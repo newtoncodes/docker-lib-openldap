@@ -13,7 +13,7 @@ spec:
     spec:
       containers:
         - name: ldap
-          image: osixia/openldap:1.1.11
+          image: osixia/openldap:1.2.4
           volumeMounts:
             - name: ldap-data
               mountPath: /var/lib/ldap
@@ -44,13 +44,15 @@ spec:
             - name: LDAP_RFC2307BIS_SCHEMA
               value: "false"
             - name: LDAP_BACKEND
-              value: "hdb"
+              value: "mdb"
             - name: LDAP_TLS
               value: "true"
             - name: LDAP_TLS_CRT_FILENAME
               value: "ldap.crt"
             - name: LDAP_TLS_KEY_FILENAME
               value: "ldap.key"
+            - name: LDAP_TLS_DH_PARAM_FILENAME
+              value: "dhparam.pem"
             - name: LDAP_TLS_CA_CRT_FILENAME
               value: "ca.crt"
             - name: LDAP_TLS_ENFORCE

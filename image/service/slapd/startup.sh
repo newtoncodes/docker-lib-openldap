@@ -8,7 +8,7 @@ log-helper level eq trace && set -x
 # Reduce maximum number of number of open file descriptors to 1024
 # otherwise slapd consumes two orders of magnitude more of RAM
 # see https://github.com/docker/docker/issues/8231
-ulimit -n 1024
+ulimit -n $LDAP_NOFILE
 
 # create dir if they not already exists
 [ -d /var/lib/ldap ] || mkdir -p /var/lib/ldap
@@ -23,11 +23,12 @@ FIRST_START_DONE="${CONTAINER_STATE_DIR}/slapd-first-start-done"
 WAS_STARTED_WITH_TLS="/etc/ldap/slapd.d/docker-openldap-was-started-with-tls"
 WAS_STARTED_WITH_TLS_ENFORCE="/etc/ldap/slapd.d/docker-openldap-was-started-with-tls-enforce"
 WAS_STARTED_WITH_REPLICATION="/etc/ldap/slapd.d/docker-openldap-was-started-with-replication"
+WAS_ADMIN_PASSWORD_SET="/etc/ldap/slapd.d/docker-openldap-was-admin-password-set"
 
 LDAP_TLS_CA_CRT_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/$LDAP_TLS_CA_CRT_FILENAME"
 LDAP_TLS_CRT_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/$LDAP_TLS_CRT_FILENAME"
 LDAP_TLS_KEY_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/$LDAP_TLS_KEY_FILENAME"
-LDAP_TLS_DH_PARAM_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/dhparam.pem"
+LDAP_TLS_DH_PARAM_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/$LDAP_TLS_DH_PARAM_FILENAME"
 
 
 # CONTAINER_SERVICE_DIR and CONTAINER_STATE_DIR variables are set by
@@ -54,7 +55,7 @@ if [ ! -e "$FIRST_START_DONE" ]; then
   }
 
   function is_new_schema() {
-    local COUNT=$(ldapsearch -Q -Y EXTERNAL -H ldapi:/// -b cn=schema,cn=config cn | grep -c $1)
+    local COUNT=$(ldapsearch -Q -Y EXTERNAL -H ldapi:/// -b cn=schema,cn=config cn | grep -c "}$1,")
     if [ "$COUNT" -eq 0 ]; then
       echo 1
     else
@@ -67,14 +68,15 @@ if [ ! -e "$FIRST_START_DONE" ]; then
     log-helper debug "Processing file ${LDIF_FILE}"
     sed -i "s|{{ LDAP_BASE_DN }}|${LDAP_BASE_DN}|g" $LDIF_FILE
     sed -i "s|{{ LDAP_BACKEND }}|${LDAP_BACKEND}|g" $LDIF_FILE
+    sed -i "s|{{ LDAP_DOMAIN }}|${LDAP_DOMAIN}|g" $LDIF_FILE
     if [ "${LDAP_READONLY_USER,,}" == "true" ]; then
       sed -i "s|{{ LDAP_READONLY_USER_USERNAME }}|${LDAP_READONLY_USER_USERNAME}|g" $LDIF_FILE
       sed -i "s|{{ LDAP_READONLY_USER_PASSWORD_ENCRYPTED }}|${LDAP_READONLY_USER_PASSWORD_ENCRYPTED}|g" $LDIF_FILE
     fi
     if grep -iq changetype $LDIF_FILE ; then
-        ldapmodify -Y EXTERNAL -Q -H ldapi:/// -f $LDIF_FILE 2>&1 | log-helper debug || ldapmodify -h localhost -p 389 -D cn=admin,$LDAP_BASE_DN -w $LDAP_ADMIN_PASSWORD -f $LDIF_FILE 2>&1 | log-helper debug
+        ldapmodify -Y EXTERNAL -Q -H ldapi:/// -f $LDIF_FILE 2>&1 | log-helper debug || ldapmodify -h localhost -p 389 -D cn=admin,$LDAP_BASE_DN -w "$LDAP_ADMIN_PASSWORD" -f $LDIF_FILE 2>&1 | log-helper debug
     else
-        ldapadd -Y EXTERNAL -Q -H ldapi:/// -f $LDIF_FILE |& log-helper debug || ldapadd -h localhost -p 389 -D cn=admin,$LDAP_BASE_DN -w $LDAP_ADMIN_PASSWORD -f $LDIF_FILE 2>&1 | log-helper debug
+        ldapadd -Y EXTERNAL -Q -H ldapi:/// -f $LDIF_FILE |& log-helper debug || ldapadd -h localhost -p 389 -D cn=admin,$LDAP_BASE_DN -w "$LDAP_ADMIN_PASSWORD" -f $LDIF_FILE 2>&1 | log-helper debug
     fi
   }
 
@@ -87,8 +89,8 @@ if [ ! -e "$FIRST_START_DONE" ]; then
   # database and config directory are empty
   # setup bootstrap config - Part 1
   #
-  if [ -z "$(ls -A -I lost+found -I .rmtab -I .gitignore /var/lib/ldap)" ] && \
-    [ -z "$(ls -A -I lost+found -I .rmtab -I .gitignore /etc/ldap/slapd.d)" ]; then
+  if [ -z "$(ls -A -I lost+found --ignore=.* /var/lib/ldap)" ] && \
+    [ -z "$(ls -A -I lost+found --ignore=.* /etc/ldap/slapd.d)" ]; then
 
     BOOTSTRAP=true
     log-helper info "Database and config directory are empty..."
@@ -133,16 +135,33 @@ EOF
   #
   # Error: the database directory (/var/lib/ldap) is empty but not the config directory (/etc/ldap/slapd.d)
   #
-  elif [ -z "$(ls -A -I lost+found -I .rmtab /var/lib/ldap)" ] && [ ! -z "$(ls -A -I lost+found -I .rmtab /etc/ldap/slapd.d)" ]; then
+  elif [ -z "$(ls -A -I lost+found --ignore=.* /var/lib/ldap)" ] && [ ! -z "$(ls -A -I lost+found --ignore=.* /etc/ldap/slapd.d)" ]; then
     log-helper error "Error: the database directory (/var/lib/ldap) is empty but not the config directory (/etc/ldap/slapd.d)"
     exit 1
 
   #
   # Error: the config directory (/etc/ldap/slapd.d) is empty but not the database directory (/var/lib/ldap)
   #
-  elif [ ! -z "$(ls -A -I lost+found -I .rmtab /var/lib/ldap)" ] && [ -z "$(ls -A -I lost+found -I .rmtab /etc/ldap/slapd.d)" ]; then
+  elif [ ! -z "$(ls -A -I lost+found --ignore=.* /var/lib/ldap)" ] && [ -z "$(ls -A -I lost+found --ignore=.* /etc/ldap/slapd.d)" ]; then
     log-helper error "Error: the config directory (/etc/ldap/slapd.d) is empty but not the database directory (/var/lib/ldap)"
     exit 1
+
+  #
+  # We have a database and config directory
+  #
+  else
+
+    # try to detect if ldap backend is hdb but LDAP_BACKEND environment variable is mdb
+    # due to default switch from hdb to mdb in 1.2.x
+    if [ "${LDAP_BACKEND}" = "mdb" ]; then
+      if [ -e "/etc/ldap/slapd.d/cn=config/olcDatabase={1}hdb.ldif" ]; then
+        log-helper warning -e "\n\n\nWarning: LDAP_BACKEND environment variable is set to mdb but hdb backend is detected."
+        log-helper warning "Going to use hdb as LDAP_BACKEND. Set LDAP_BACKEND=hdb to discard this message."
+        log-helper warning -e "https://github.com/osixia/docker-openldap#set-your-own-environment-variables\n\n\n"
+        LDAP_BACKEND="hdb"
+      fi
+    fi
+
   fi
 
   if [ "${KEEP_EXISTING_CONFIG,,}" == "true" ]; then
@@ -180,7 +199,7 @@ EOF
       [[ -z "$PREVIOUS_LDAP_TLS_CA_CRT_PATH" ]] && PREVIOUS_LDAP_TLS_CA_CRT_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/$LDAP_TLS_CA_CRT_FILENAME"
       [[ -z "$PREVIOUS_LDAP_TLS_CRT_PATH" ]] && PREVIOUS_LDAP_TLS_CRT_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/$LDAP_TLS_CRT_FILENAME"
       [[ -z "$PREVIOUS_LDAP_TLS_KEY_PATH" ]] && PREVIOUS_LDAP_TLS_KEY_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/$LDAP_TLS_KEY_FILENAME"
-      [[ -z "$PREVIOUS_LDAP_TLS_DH_PARAM_PATH" ]] && PREVIOUS_LDAP_TLS_DH_PARAM_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/dhparam.pem"
+      [[ -z "$PREVIOUS_LDAP_TLS_DH_PARAM_PATH" ]] && PREVIOUS_LDAP_TLS_DH_PARAM_PATH="${CONTAINER_SERVICE_DIR}/slapd/assets/certs/$LDAP_TLS_DH_PARAM_FILENAME"
 
       ssl-helper $LDAP_SSL_HELPER_PREFIX $PREVIOUS_LDAP_TLS_CRT_PATH $PREVIOUS_LDAP_TLS_KEY_PATH $PREVIOUS_LDAP_TLS_CA_CRT_PATH
       [ -f ${PREVIOUS_LDAP_TLS_DH_PARAM_PATH} ] || openssl dhparam -out ${LDAP_TLS_DH_PARAM_PATH} 2048
@@ -214,7 +233,7 @@ EOF
 
       # convert schemas to ldif
       SCHEMAS=""
-      for f in $(find ${CONTAINER_SERVICE_DIR}/slapd/assets/config/bootstrap/schema -name \*.schema -type f); do
+      for f in $(find ${CONTAINER_SERVICE_DIR}/slapd/assets/config/bootstrap/schema -name \*.schema -type f|sort); do
         SCHEMAS="$SCHEMAS ${f}"
       done
       ${CONTAINER_SERVICE_DIR}/slapd/assets/schema-to-ldif.sh "$SCHEMAS"
@@ -233,7 +252,7 @@ EOF
       done
 
       # set config password
-      LDAP_CONFIG_PASSWORD_ENCRYPTED=$(slappasswd -s $LDAP_CONFIG_PASSWORD)
+      LDAP_CONFIG_PASSWORD_ENCRYPTED=$(slappasswd -s "$LDAP_CONFIG_PASSWORD")
       sed -i "s|{{ LDAP_CONFIG_PASSWORD_ENCRYPTED }}|${LDAP_CONFIG_PASSWORD_ENCRYPTED}|g" ${CONTAINER_SERVICE_DIR}/slapd/assets/config/bootstrap/ldif/01-config-password.ldif
 
       # adapt security config file
@@ -379,6 +398,23 @@ EOF
       log-helper info "Disable replication config..."
       disableReplication || true
 
+    fi
+
+    if [[ -f "$WAS_ADMIN_PASSWORD_SET" ]]; then
+      get_ldap_base_dn
+      LDAP_CONFIG_PASSWORD_ENCRYPTED=$(slappasswd -s "$LDAP_CONFIG_PASSWORD")
+      LDAP_ADMIN_PASSWORD_ENCRYPTED=$(slappasswd -s "$LDAP_ADMIN_PASSWORD")
+      sed -i "s|{{ LDAP_CONFIG_PASSWORD_ENCRYPTED }}|${LDAP_CONFIG_PASSWORD_ENCRYPTED}|g" ${CONTAINER_SERVICE_DIR}/slapd/assets/config/admin-pw/ldif/06-root-pw-change.ldif
+      sed -i "s|{{ LDAP_ADMIN_PASSWORD_ENCRYPTED }}|${LDAP_ADMIN_PASSWORD_ENCRYPTED}|g" ${CONTAINER_SERVICE_DIR}/slapd/assets/config/admin-pw/ldif/06-root-pw-change.ldif
+      sed -i "s|{{ LDAP_BACKEND }}|${LDAP_BACKEND}|g" ${CONTAINER_SERVICE_DIR}/slapd/assets/config/admin-pw/ldif/06-root-pw-change.ldif
+      sed -i "s|{{ LDAP_ADMIN_PASSWORD_ENCRYPTED }}|${LDAP_ADMIN_PASSWORD_ENCRYPTED}|g" ${CONTAINER_SERVICE_DIR}/slapd/assets/config/admin-pw/ldif/07-admin-pw-change.ldif
+      sed -i "s|{{ LDAP_BASE_DN }}|${LDAP_BASE_DN}|g" ${CONTAINER_SERVICE_DIR}/slapd/assets/config/admin-pw/ldif/07-admin-pw-change.ldif
+
+      for f in $(find ${CONTAINER_SERVICE_DIR}/slapd/assets/config/admin-pw/ldif -type f -name \*.ldif  | sort); do
+        ldap_add_or_modify "$f"
+      done
+    else
+       touch "$WAS_ADMIN_PASSWORD_SET"
     fi
 
     #
